@@ -6,14 +6,17 @@
 #include <string.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 
 #define N 13
 
 extern char **environ;
 char uName[20];
 
-char *allowed[N] = {"cp", "touch", "mkdir", "ls", "pwd", "cat", "grep", "chmod", "diff", "cd", "exit", "help", "sendmsg"};
+char *allowed[N] = {
+    "cp", "touch", "mkdir", "ls", "pwd",
+    "cat", "grep", "chmod", "diff", "cd",
+    "exit", "help", "sendmsg"
+};
 
 struct message {
     char source[50];
@@ -28,91 +31,69 @@ void terminate(int sig) {
 }
 
 void sendmsg(char *user, char *target, char *msg) {
-    int serverfd;
-    struct message m;
-    strcpy(m.source, user);
-    strcpy(m.target, target);
-    strcpy(m.msg, msg);
+    struct message req;
+    strcpy(req.source, user);
+    strcpy(req.target, target);
+    strcpy(req.msg, msg);
 
-    serverfd = open("serverFIFO", O_WRONLY);
-    if (serverfd == -1) {
-        perror("open serverFIFO failed");
-        return;
+    int server = open("serverFIFO", O_WRONLY);
+    if (server != -1) {
+        write(server, &req, sizeof(req));
+        close(server);
     }
-
-    write(serverfd, &m, sizeof(struct message));
-    close(serverfd);
 }
 
-void* messageListener(void *arg) {
-    int userfd;
-    struct message m;
-
-    char fifoName[100];
-    snprintf(fifoName, sizeof(fifoName), "%s", uName);
-
-    userfd = open(fifoName, O_RDONLY);
-    if (userfd == -1) {
-        perror("open user FIFO failed");
-        pthread_exit((void*)1);
-    }
+void *messageListener(void *arg) {
+    char *pipeName = (char *)arg;
+    struct message incomingMsg;
+    int userFifo = open(pipeName, O_RDONLY);
 
     while (1) {
-        int n = read(userfd, &m, sizeof(struct message));
-        if (n > 0) {
-            printf("\nIncoming message from %s: %s\n", m.source, m.msg);
-            printf("rsh>");
+        int bytesRead = read(userFifo, &incomingMsg, sizeof(struct message));
+        if (bytesRead > 0) {
+            printf("Incoming message from %s: %s\n", incomingMsg.source, incomingMsg.msg);
             fflush(stdout);
         }
     }
-    close(userfd);
-    pthread_exit((void*)0);
+    close(userFifo);
+    pthread_exit(0);
 }
 
-int isAllowed(const char* cmd) {
-    int i;
-    for (i = 0; i < N; i++) {
-        if (strcmp(cmd, allowed[i]) == 0) {
-            return 1;
-        }
+int isAllowed(const char *cmd) {
+    for (int i = 0; i < N; i++) {
+        if (strcmp(cmd, allowed[i]) == 0) return 1;
     }
     return 0;
 }
 
 int main(int argc, char **argv) {
-    pid_t pid;
-    char **cargv;
-    char *path;
-    char line[256];
-    int status;
-    posix_spawnattr_t attr;
-    pthread_t tid;
-
     if (argc != 2) {
         printf("Usage: ./rsh <username>\n");
         exit(1);
     }
-    signal(SIGINT, terminate);
 
+    signal(SIGINT, terminate);
     strcpy(uName, argv[1]);
 
-    // Create the message listener thread
-    if (pthread_create(&tid, NULL, messageListener, NULL) != 0) {
-        perror("pthread_create failed");
-        exit(1);
-    }
+    pthread_t tid;
+    pthread_create(&tid, NULL, messageListener, (void *)uName);
+    pthread_detach(tid);
+
+    char line[256];
+    char **cargv;
+    char *path;
+    int status;
+    posix_spawnattr_t attr;
+    pid_t pid;
 
     while (1) {
         fprintf(stderr, "rsh>");
-
-        if (fgets(line, 256, stdin) == NULL) continue;
-
+        if (fgets(line, sizeof(line), stdin) == NULL) continue;
         if (strcmp(line, "\n") == 0) continue;
 
-        line[strlen(line) - 1] = '\0'; // remove newline
+        line[strcspn(line, "\n")] = '\0';
 
-        char cmd[256];
-        char line2[256];
+        char cmd[256], line2[256];
         strcpy(line2, line);
         strcpy(cmd, strtok(line, " "));
 
@@ -123,18 +104,16 @@ int main(int argc, char **argv) {
 
         if (strcmp(cmd, "sendmsg") == 0) {
             char *target = strtok(NULL, " ");
-            if (target == NULL) {
+            if (!target) {
                 printf("sendmsg: you have to specify target user\n");
                 continue;
             }
-
-            char *message = strtok(NULL, "");
-            if (message == NULL) {
+            char *msg = strtok(NULL, "");
+            if (!msg) {
                 printf("sendmsg: you have to enter a message\n");
                 continue;
             }
-
-            sendmsg(uName, target, message);
+            sendmsg(uName, target, msg);
             continue;
         }
 
@@ -144,7 +123,7 @@ int main(int argc, char **argv) {
             char *targetDir = strtok(NULL, " ");
             if (strtok(NULL, " ") != NULL) {
                 printf("-rsh: cd: too many arguments\n");
-            } else {
+            } else if (targetDir) {
                 chdir(targetDir);
             }
             continue;
@@ -158,27 +137,26 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        cargv = (char**)malloc(sizeof(char*));
-        cargv[0] = (char *)malloc(strlen(cmd) + 1);
-        path = (char *)malloc(strlen(cmd) + 1);
+        cargv = malloc(sizeof(char*));
+        path = malloc(strlen(cmd) + 1);
         strcpy(path, cmd);
+        cargv[0] = malloc(strlen(cmd) + 1);
         strcpy(cargv[0], cmd);
 
-        char *attrToken = strtok(line2, " "); // skip first word (cmd)
-        attrToken = strtok(NULL, " ");
+        char *arg = strtok(line2, " ");
+        arg = strtok(NULL, " ");
         int n = 1;
-        while (attrToken != NULL) {
+        while (arg != NULL) {
             n++;
-            cargv = (char**)realloc(cargv, sizeof(char*) * n);
-            cargv[n - 1] = (char *)malloc(strlen(attrToken) + 1);
-            strcpy(cargv[n - 1], attrToken);
-            attrToken = strtok(NULL, " ");
+            cargv = realloc(cargv, sizeof(char*) * n);
+            cargv[n - 1] = malloc(strlen(arg) + 1);
+            strcpy(cargv[n - 1], arg);
+            arg = strtok(NULL, " ");
         }
-        cargv = (char**)realloc(cargv, sizeof(char*) * (n + 1));
+        cargv = realloc(cargv, sizeof(char*) * (n + 1));
         cargv[n] = NULL;
 
         posix_spawnattr_init(&attr);
-
         if (posix_spawnp(&pid, path, NULL, &attr, cargv, environ) != 0) {
             perror("spawn failed");
             exit(EXIT_FAILURE);
@@ -191,5 +169,7 @@ int main(int argc, char **argv) {
 
         posix_spawnattr_destroy(&attr);
     }
+
     return 0;
 }
+
