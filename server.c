@@ -6,50 +6,48 @@
 #include <signal.h>
 
 struct message {
-    char source[50];
-    char target[50];
-    char msg[200];
+	char source[50];
+	char target[50];
+	char msg[200]; // message body
 };
 
 void terminate(int sig) {
-    printf("Exiting....\n");
-    fflush(stdout);
-    exit(0);
+	printf("Exiting....\n");
+	fflush(stdout);
+	exit(0);
 }
 
 int main() {
-    int server;
-    int targetfd;
-    int dummyfd;
-    struct message req;
-    char targetFIFO[100];
+	int server;
+	int target;
+	int dummyfd;
+	struct message req;
+	signal(SIGPIPE,SIG_IGN);
+	signal(SIGINT,terminate);
+	server = open("serverFIFO",O_RDONLY);
+	dummyfd = open("serverFIFO",O_WRONLY);
 
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, terminate);
+	while (1) {
+		// TODO:
+		// read requests from serverFIFO
 
-    server = open("serverFIFO", O_RDONLY);
-    dummyfd = open("serverFIFO", O_WRONLY);
+		int bytesRead = read(server, &req, sizeof(struct message));
+		if (bytesRead == 0) {
+			continue;
+		}
 
-    while (1) {
-        int n = read(server, &req, sizeof(struct message));
-        if (n > 0) {
-            printf("Received a request from %s to send the message %s to %s.\n", req.source, req.msg, req.target);
+		printf("Received a request from %s to send the message %s to %s.\n",req.source,req.msg,req.target);
 
-            snprintf(targetFIFO, sizeof(targetFIFO), "%s", req.target);
+		// TODO:
+		// open target FIFO and write the whole message struct to the target FIFO
+		// close target FIFO after writing the message
 
-            targetfd = open(targetFIFO, O_WRONLY);
-            if (targetfd == -1) {
-                perror("open target FIFO failed");
-                continue;
-            }
+		target = open(req.target, O_WRONLY);
+		write(target, &req, sizeof(struct message));
+		close(target);
 
-            write(targetfd, &req, sizeof(struct message));
-            close(targetfd);
-        }
-    }
-
-    close(server);
-    close(dummyfd);
-    return 0;
+	}
+	close(server);
+	close(dummyfd);
+	return 0;
 }
-
